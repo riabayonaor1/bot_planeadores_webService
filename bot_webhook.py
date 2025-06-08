@@ -923,7 +923,7 @@ async def process_telegram_audio(file_id: str) -> bytes:
         file_url = file.file_path
         
         # Descargar archivo
-        response = requests.get(f"https://api.telegram.org/file/bot{telegram_token}/{file_url}")
+        response = requests.get(f"https://api.telegram.org/file/bot{telegram_token}/{file_url}" )
         return response.content
     except Exception as e:
         logger.error(f"❌ Error procesando audio: {e}")
@@ -1090,11 +1090,12 @@ if __name__ == '__main__':
     logger.info("🚀 Iniciando Planeador-Aula-Rick-Bot (Webhook)")
     logger.info(f"🤖 Gemini AI disponible: {GEMINI_AVAILABLE}")
     
-    # Configurar webhook si está disponible
-    if os.getenv('WEBHOOK_URL'):
-        asyncio.run(setup_webhook())
+    # Comentado: La configuración del webhook se hace una sola vez desde el script setup_webhook.py
+    # if os.getenv('WEBHOOK_URL'):
+    #     asyncio.run(setup_webhook())
     
     # Iniciar servidor Flask
     port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port, debug=False)
+
 
