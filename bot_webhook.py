@@ -5,6 +5,7 @@ Planeador-Aula-Rick-Bot - VERSIÓN WEBHOOK PARA RENDER WEB SERVICE
 - Usa webhooks en lugar de long-polling
 - Mantiene toda la funcionalidad original
 - Optimizado para costos en Render
+- CORREGIDO: Problema del event loop cerrado
 """
 
 import asyncio
@@ -18,6 +19,7 @@ from typing import Dict, List, Any, Optional
 from dotenv import load_dotenv
 from flask import Flask, request, jsonify
 import threading
+import concurrent.futures
 
 # Debug: Mostrar variables de entorno disponibles
 print("🔍 DEBUG: Variables de entorno disponibles:")
@@ -71,6 +73,9 @@ logger = logging.getLogger(__name__)
 
 # Crear aplicación Flask
 app = Flask(__name__)
+
+# Pool de threads para manejar requests asíncronos
+executor = concurrent.futures.ThreadPoolExecutor(max_workers=5)
 
 class PlaneadorConAudio:
     def __init__(self):
@@ -892,38 +897,59 @@ bot_instance = PlaneadorConAudio()
 # Crear bot de Telegram para envío de mensajes
 telegram_bot = Bot(token=telegram_token)
 
-# Función para enviar mensaje de texto
-async def send_telegram_message(chat_id: int, text: str):
-    """Envía mensaje de texto a Telegram"""
+# Función para enviar mensaje de texto usando requests síncronos
+def send_telegram_message_sync(chat_id: int, text: str):
+    """Envía mensaje de texto a Telegram usando requests síncronos"""
     try:
-        await telegram_bot.send_message(chat_id=chat_id, text=text, parse_mode='Markdown')
+        url = f"https://api.telegram.org/bot{telegram_token}/sendMessage"
+        data = {
+            "chat_id": chat_id,
+            "text": text,
+            "parse_mode": "Markdown"
+        }
+        response = requests.post(url, json=data, timeout=30)
+        response.raise_for_status()
         logger.info(f"✅ Mensaje enviado a {chat_id}")
     except Exception as e:
         logger.error(f"❌ Error enviando mensaje: {e}")
 
-# Función para enviar archivo
-async def send_telegram_document(chat_id: int, file_path: str, caption: str):
-    """Envía documento a Telegram"""
+# Función para enviar archivo usando requests síncronos
+def send_telegram_document_sync(chat_id: int, file_path: str, caption: str):
+    """Envía documento a Telegram usando requests síncronos"""
     try:
+        url = f"https://api.telegram.org/bot{telegram_token}/sendDocument"
         with open(file_path, 'rb') as file:
-            await telegram_bot.send_document(
-                chat_id=chat_id,
-                document=file,
-                caption=caption
-            )
+            files = {'document': file}
+            data = {
+                'chat_id': chat_id,
+                'caption': caption
+            }
+            response = requests.post(url, files=files, data=data, timeout=60)
+            response.raise_for_status()
         logger.info(f"✅ Archivo enviado a {chat_id}: {file_path}")
     except Exception as e:
         logger.error(f"❌ Error enviando archivo: {e}")
 
-# Función para procesar audio
-async def process_telegram_audio(file_id: str) -> bytes:
-    """Descarga y procesa audio de Telegram"""
+# Función para procesar audio usando requests síncronos
+def process_telegram_audio_sync(file_id: str) -> bytes:
+    """Descarga y procesa audio de Telegram usando requests síncronos"""
     try:
-        file = await telegram_bot.get_file(file_id)
-        file_url = file.file_path
+        # Obtener información del archivo
+        url = f"https://api.telegram.org/bot{telegram_token}/getFile"
+        response = requests.get(url, params={"file_id": file_id}, timeout=30)
+        response.raise_for_status()
+        file_info = response.json()
+        
+        if not file_info.get("ok"):
+            raise Exception(f"Error obteniendo archivo: {file_info}")
+        
+        file_path = file_info["result"]["file_path"]
         
         # Descargar archivo
-        response = requests.get(f"https://api.telegram.org/file/bot{telegram_token}/{file_url}" )
+        download_url = f"https://api.telegram.org/file/bot{telegram_token}/{file_path}"
+        response = requests.get(download_url, timeout=60)
+        response.raise_for_status()
+        
         return response.content
     except Exception as e:
         logger.error(f"❌ Error procesando audio: {e}")
@@ -936,8 +962,8 @@ def home():
     return jsonify({
         "status": "active",
         "bot": "Planeador-Aula-Rick-Bot",
-        "version": "webhook",
-        "description": "Bot para generar planeadores de aula con IA",
+        "version": "webhook-fixed",
+        "description": "Bot para generar planeadores de aula con IA - Event loop corregido",
         "endpoints": {
             "webhook": "/webhook",
             "health": "/health"
@@ -965,8 +991,8 @@ def webhook():
         
         logger.info(f"📨 Webhook recibido: {data}")
         
-        # Procesar en hilo separado para no bloquear
-        threading.Thread(target=process_webhook_async, args=(data,)).start()
+        # Procesar en thread pool para evitar problemas de event loop
+        future = executor.submit(process_webhook_sync, data)
         
         return jsonify({"status": "ok"})
         
@@ -974,132 +1000,97 @@ def webhook():
         logger.error(f"❌ Error en webhook: {e}")
         return jsonify({"error": str(e)}), 500
 
-def process_webhook_async(data):
-    """Procesa webhook de forma asíncrona"""
+def process_webhook_sync(data):
+    """Procesa webhook de forma síncrona usando thread pool"""
     try:
-        # Crear nuevo loop para este hilo
+        # Crear nuevo loop para este thread
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         
-        # Ejecutar procesamiento
-        loop.run_until_complete(process_webhook_data(data))
-        
+        try:
+            # Ejecutar el procesamiento asíncrono
+            loop.run_until_complete(handle_webhook(data))
+        finally:
+            # Cerrar el loop correctamente
+            loop.close()
+            
     except Exception as e:
-        logger.error(f"❌ Error procesando webhook async: {e}")
-    finally:
-        loop.close()
+        logger.error(f"❌ Error procesando webhook sync: {e}")
 
-async def process_webhook_data(data):
-    """Procesa los datos del webhook"""
+async def handle_webhook(data):
+    """Maneja el webhook de Telegram"""
     try:
-        # Verificar si hay mensaje
+        # Verificar si es un mensaje
         if 'message' not in data:
+            logger.warning("Webhook sin mensaje")
             return
         
         message_data = data['message']
         chat_id = message_data['chat']['id']
         user_id = message_data['from']['id']
         
-        # Procesar según tipo de mensaje
+        # Procesar texto o audio
         if 'text' in message_data:
             # Mensaje de texto
             text = message_data['text']
-            
-            # Comando /start
-            if text == '/start':
-                text = "Hola"
-            
-            # Procesar mensaje
             result = await bot_instance.process_message(text, user_id)
             
-            # Enviar respuesta
-            await send_telegram_message(chat_id, result["telegram_response"])
-            
-            # Enviar archivos si los hay
-            for file_info in result.get("files_to_send", []):
-                if os.path.exists(file_info["path"]):
-                    await send_telegram_document(
-                        chat_id, 
-                        file_info["path"], 
-                        file_info["caption"]
-                    )
-        
         elif 'voice' in message_data:
             # Mensaje de audio
-            voice_data = message_data['voice']
-            file_id = voice_data['file_id']
-            
-            # Notificar que está procesando
-            await send_telegram_message(chat_id, "🎤 Transcribiendo audio...")
-            
-            # Descargar y procesar audio
-            audio_data = await process_telegram_audio(file_id)
+            file_id = message_data['voice']['file_id']
+            audio_data = process_telegram_audio_sync(file_id)
             
             if audio_data:
                 # Transcribir audio
                 transcribed_text = await bot_instance.transcribe_audio_with_ai(audio_data)
+                logger.info(f"🎤 Texto transcrito: {transcribed_text}")
                 
-                if transcribed_text and "Error:" not in transcribed_text:
-                    # Mostrar transcripción
-                    await send_telegram_message(chat_id, f"📝 **Transcripción:** {transcribed_text}")
-                    
-                    # Procesar como mensaje de texto
-                    result = await bot_instance.process_message(transcribed_text, user_id)
-                    
-                    # Enviar respuesta
-                    await send_telegram_message(chat_id, result["telegram_response"])
-                    
-                    # Enviar archivos si los hay
-                    for file_info in result.get("files_to_send", []):
-                        if os.path.exists(file_info["path"]):
-                            await send_telegram_document(
-                                chat_id, 
-                                file_info["path"], 
-                                file_info["caption"]
-                            )
-                else:
-                    await send_telegram_message(chat_id, transcribed_text)
+                # Procesar texto transcrito
+                result = await bot_instance.process_message(transcribed_text, user_id)
             else:
-                await send_telegram_message(chat_id, "❌ Error procesando audio. Por favor, envía un mensaje de texto.")
-        
-    except Exception as e:
-        logger.error(f"❌ Error procesando datos del webhook: {e}")
-
-# Función para configurar webhook
-async def setup_webhook():
-    """Configura el webhook de Telegram"""
-    try:
-        webhook_url = os.getenv('WEBHOOK_URL')
-        if not webhook_url:
-            logger.warning("⚠️ WEBHOOK_URL no configurada. El webhook debe configurarse manualmente.")
+                result = {
+                    "telegram_response": "⚠️ No pude procesar el audio. Intenta enviar un mensaje de texto.",
+                    "completed": False
+                }
+        else:
+            logger.warning("Mensaje sin texto ni audio")
             return
         
-        # Configurar webhook
-        await telegram_bot.set_webhook(url=f"{webhook_url}/webhook")
-        logger.info(f"✅ Webhook configurado: {webhook_url}/webhook")
+        # Enviar respuesta
+        if result.get("telegram_response"):
+            send_telegram_message_sync(chat_id, result["telegram_response"])
+        
+        # Enviar archivos si existen
+        if result.get("files_to_send"):
+            for file_info in result["files_to_send"]:
+                send_telegram_document_sync(
+                    chat_id, 
+                    file_info["path"], 
+                    file_info["caption"]
+                )
         
     except Exception as e:
-        logger.error(f"❌ Error configurando webhook: {e}")
+        logger.error(f"❌ Error manejando webhook: {e}")
+        # Enviar mensaje de error al usuario
+        try:
+            chat_id = data.get('message', {}).get('chat', {}).get('id')
+            if chat_id:
+                send_telegram_message_sync(
+                    chat_id, 
+                    "⚠️ Ocurrió un error procesando tu mensaje. Por favor, intenta de nuevo."
+                )
+        except:
+            pass
 
 if __name__ == '__main__':
-    # Verificar token
-    if not telegram_token:
-        logger.error("❌ TELEGRAM_BOT_TOKEN no encontrado")
-        exit(1)
+    logger.info("🚀 Iniciando Planeador-Aula-Rick-Bot (Webhook - Event Loop Corregido)")
     
-    logger.info("🚀 Iniciando Planeador-Aula-Rick-Bot (Webhook)")
-    logger.info(f"🤖 Gemini AI disponible: {GEMINI_AVAILABLE}")
+    # Configurar Flask para producción
+    port = int(os.environ.get('PORT', 10000))
     
-    # Comentado: La configuración del webhook se hace una sola vez desde el script setup_webhook.py
-    # if os.getenv('WEBHOOK_URL'):
-    #     asyncio.run(setup_webhook())
-    
-    # Iniciar servidor Flask
-    port = int(os.environ.get('PORT', 5000))
-    app.run(host='0.0.0.0', port=port, debug=False)
-
-
-
-
-
-
+    app.run(
+        host='0.0.0.0',
+        port=port,
+        debug=False,
+        threaded=True
+    )
