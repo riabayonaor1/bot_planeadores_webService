@@ -17,7 +17,6 @@ from datetime import datetime
 from typing import Dict, List, Any, Optional
 from dotenv import load_dotenv
 from flask import Flask, request, jsonify
-# Removed: import threading (no longer needed for manual threading)
 
 # Debug: Mostrar variables de entorno disponibles
 print("🔍 DEBUG: Variables de entorno disponibles:")
@@ -46,7 +45,6 @@ if not google_api_key:
 # Imports para Telegram
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
-# Removed: import io, import requests (handled by telegram-bot library)
 
 # Imports para IA con búsqueda web
 try:
@@ -161,8 +159,8 @@ class PlaneadorConAudio:
                 "tema": None,
                 "periodo": None,
                 "fechas": None
+                }
             }
-        }
         logger.info(f"🔄 Sesión reseteada para usuario {user_id}")
     
     async def classify_message_intent(self, message: str) -> str:
@@ -1019,6 +1017,7 @@ if __name__ == "__main__":
     # Iniciar servidor Flask
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port, debug=False)
+
 
 
 
